@@ -1,124 +1,61 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+plots.py
+========
+
+Plotting utilities for sol_fci_essos_v3.py:
+
+  • toroidal_wall_mask
+  • ESSOS wrapper
+  • 3D geometry figure: coils + torus + field lines + L_parallel
+  • 2D slices and radial profiles
+  • Dynamics figure (volume-averaged n, T, u, neutrals)
+  • SOL-width scaling vs 1D benchmark
+"""
+
+from __future__ import annotations
+
 import os
-from typing import Callable, Tuple 
+from typing import Callable, Tuple
+
+import jax
+import jax.numpy as jnp
+from jax import jit, vmap
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
-from jax import jit, vmap
-import jax.numpy as jnp
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
 Array = jnp.ndarray
 
-# ---------------------------------------------------------------------------
-# Plotting: publication-ready figures
-# ---------------------------------------------------------------------------
-
-def build_cartesian_grid(cfg) -> Tuple[Array, Array, Array, Array]:
-    """
-    Build 3D Cartesian grid and coordinate array.
-
-    Returns
-    -------
-    x, y, z : 1D arrays
-    xyz : array (Nx, Ny, Nz, 3)
-    """
-    x = jnp.linspace(cfg.xlim[0], cfg.xlim[1], cfg.Nx)
-    y = jnp.linspace(cfg.ylim[0], cfg.ylim[1], cfg.Ny) if False else jnp.linspace(cfg.ylim[0], cfg.ylim[1], cfg.Ny)
-    z = jnp.linspace(cfg.zlim[0], cfg.zlim[1], cfg.Nz)
-    X, Y, Z = jnp.meshgrid(x, y, z, indexing="ij")
-    xyz = jnp.stack([X, Y, Z], axis=-1)
-    return x, y, z, xyz
-
-def make_publication_figures(times: np.ndarray,
-                             y_hist: np.ndarray,
-                             x: np.ndarray,
-                             y: np.ndarray,
-                             z: np.ndarray,
-                             outdir: str = "figures") -> None:
-    """
-    Create publication-ready figures from the simulation.
-
-    Figures:
-    --------
-    1) 2D slice of T_e at midplane z ~ 0, at final time.
-    2) 2D slice of n at midplane z ~ 0, at final time.
-    3) Radial profile of T_e and n along major radius at z=0, y>0.
-    """
-    os.makedirs(outdir, exist_ok=True)
-
-    Nt, _, Nx, Ny, Nz = y_hist.shape
-    n = y_hist[-1, 0]
-    u = y_hist[-1, 1]
-    T = y_hist[-1, 2]
-
-    # Find closest z=0 slice
-    iz0 = int(np.argmin(np.abs(z)))
-    z0 = float(z[iz0])
-
-    # 2D slices at z ~ 0
-    n_slice = n[:, :, iz0]
-    T_slice = T[:, :, iz0]
-
-    X, Y = np.meshgrid(x, y, indexing="ij")
-
-    # Figure 1: T_e slice
-    fig1, ax1 = plt.subplots(figsize=(5.0, 4.0))
-    c1 = ax1.pcolormesh(X, Y, T_slice.T, shading="auto")
-    fig1.colorbar(c1, ax=ax1, label=r"$T_e$")
-    ax1.set_xlabel(r"$x$")
-    ax1.set_ylabel(r"$y$")
-    ax1.set_title(rf"$T_e(x,y,z\approx {z0:.2f})$ at $t={times[-1]:.3e}$")
-    fig1.tight_layout()
-    fig1.savefig(os.path.join(outdir, "Te_slice_midplane.png"), dpi=300)
-    plt.close(fig1)
-
-    # Figure 2: n slice
-    fig2, ax2 = plt.subplots(figsize=(5.0, 4.0))
-    c2 = ax2.pcolormesh(X, Y, n_slice.T, shading="auto")
-    fig2.colorbar(c2, ax=ax2, label=r"$n$")
-    ax2.set_xlabel(r"$x$")
-    ax2.set_ylabel(r"$y$")
-    ax2.set_title(rf"$n(x,y,z\approx {z0:.2f})$ at $t={times[-1]:.3e}$")
-    fig2.tight_layout()
-    fig2.savefig(os.path.join(outdir, "n_slice_midplane.png"), dpi=300)
-    plt.close(fig2)
-
-    # Figure 3: radial profile along y>0 line at midplane
-    iy_pos = np.argmax(y > 0.0) if np.any(y > 0.0) else Ny // 2
-    n_prof = n[:, iy_pos, iz0]
-    T_prof = T[:, iy_pos, iz0]
-    R_prof = np.sqrt(x**2 + y[iy_pos]**2)
-
-    fig3, ax3 = plt.subplots(figsize=(5.0, 4.0))
-    ax3.plot(R_prof, T_prof, label=r"$T_e$")
-    ax3.plot(R_prof, n_prof, label=r"$n$")
-    ax3.set_xlabel(r"$R$")
-    ax3.set_ylabel(r"Profiles (arb. units)")
-    ax3.set_title(rf"Radial profiles at $(y={y[iy_pos]:.2f}, z={z0:.2f})$")
-    ax3.legend()
-    fig3.tight_layout()
-    fig3.savefig(os.path.join(outdir, "radial_profiles.png"), dpi=300)
-    plt.close(fig3)
-
-    print(f"[fig] Saved figures to '{outdir}'.")
-
 
 # ---------------------------------------------------------------------------
-# ESSOS wrapper
+# Basic geometry helpers
 # ---------------------------------------------------------------------------
+
+def toroidal_wall_mask(xyz: Array, R0: float, a: float) -> Array:
+    """
+    Circular-torus mask:
+
+        r_minor = sqrt[(R - R0)^2 + z^2]
+        mask = 1 for r_minor < a, else 0
+    """
+    x = xyz[..., 0]
+    y = xyz[..., 1]
+    z = xyz[..., 2]
+    R = jnp.sqrt(x**2 + y**2)
+    r_minor = jnp.sqrt((R - R0) ** 2 + z**2)
+    return (r_minor < a).astype(jnp.float64)
+
 
 def make_essos_B_func(json_file: str):
     """
     Build a JAX-compatible B_func(xyz_flat) using ESSOS BiotSavart.
 
-    Parameters
-    ----------
-    json_file : str
-        Path to ESSOS coil JSON file.
-
     Returns
     -------
-    B_func : callable
-        B_func(xyz_flat: (N,3)) -> (N,3).
+    B_func : callable  (xyz_flat: (N,3) -> (N,3))
+    coils  : ESSOS coils object (for plotting)
     """
     from essos.fields import BiotSavart
     from essos.coils import Coils_from_json
@@ -126,239 +63,148 @@ def make_essos_B_func(json_file: str):
     coils = Coils_from_json(json_file)
     field = BiotSavart(coils)
 
-    # ESSOS BiotSavart.B_contravariant expects *one* point of shape (3,)
-    # We vmap over the first axis of xyz_flat, which has shape (N, 3)
     @jit
     def B_func(xyz_flat: Array) -> Array:
-        # xyz_flat: (N, 3)
-        return vmap(field.B_contravariant)(xyz_flat)  # -> (N, 3)
+        return vmap(field.B_contravariant)(xyz_flat)
 
     return B_func, coils
 
-def trace_field_line_with_connection(
+
+def build_cartesian_grid_from_cfg(cfg) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Local copy of the grid builder to avoid import cycles."""
+    x = np.linspace(cfg.xlim[0], cfg.xlim[1], cfg.Nx)
+    y = np.linspace(cfg.ylim[0], cfg.ylim[1], cfg.Ny)
+    z = np.linspace(cfg.zlim[0], cfg.zlim[1], cfg.Nz)
+    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+    xyz = np.stack([X, Y, Z], axis=-1)
+    return x, y, z, xyz
+
+
+# ---------------------------------------------------------------------------
+# Field-line tracing (for geometry figure)
+# ---------------------------------------------------------------------------
+
+def trace_field_line(
     x0: np.ndarray,
     B_func: Callable[[Array], Array],
-    wall_mask_func: Callable[[Array], Array],
-    cfg,
     ds: float,
-    max_steps: int,
+    n_steps: int,
+    mask_func: Callable[[Array], Array] | None = None,
 ) -> Tuple[np.ndarray, float]:
     """
-    Trace a single field line starting at x0, stepping along +b with step ds,
-    until it hits the wall (mask=0) or leaves the domain.
+    Trace a single field line starting at x0, stepping along +b with step ds.
+
+    If mask_func is provided, stop when we leave the plasma (mask < 0.5).
 
     Returns
     -------
-    pts : array (n_pts, 3)
-        Coordinates along the field line.
-    Lpar : float
-        Connection length along the traced segment (≈ (n_pts-1)*ds).
+    pts : (n_pts,3)  coordinates along the line
+    L   : total arclength inside mask (connection length along this line)
     """
-    pts = np.zeros((max_steps, 3))
+    pts = np.zeros((n_steps, 3))
     pts[0] = x0
+    L = 0.0
 
-    for k in range(max_steps - 1):
-        xk = jnp.asarray(pts[k])[None, :]      # (1,3)
-        Bk = B_func(xk)                        # (1,3)
+    for k in range(n_steps - 1):
+        xk = jnp.asarray(pts[k])[None, :]
+        Bk = B_func(xk)
         Bk_np = np.array(Bk)[0]
         Bmag = np.linalg.norm(Bk_np)
-        if Bmag < 1e-10:
-            n_pts = k + 1
-            Lpar = ds * (n_pts - 1)
-            return pts[:n_pts], Lpar
-
+        if Bmag < 1e-8:
+            pts = pts[: k + 1]
+            break
         b = Bk_np / Bmag
         x_next = pts[k] + ds * b
+        if mask_func is not None:
+            val = np.array(mask_func(jnp.asarray(x_next)[None, :]))[0]
+            if val < 0.5:
+                pts = pts[: k + 1]
+                break
+        pts[k + 1] = x_next
+        L += ds
 
-        # Domain bounds
-        if not (cfg.xlim[0] <= x_next[0] <= cfg.xlim[1] and
-                cfg.ylim[0] <= x_next[1] <= cfg.ylim[1] and
-                cfg.zlim[0] <= x_next[2] <= cfg.zlim[1]):
-            n_pts = k + 1
-            Lpar = ds * (n_pts - 1)
-            return pts[:n_pts], Lpar
-
-        # Wall / plasma mask check at the new point
-        x_next_jax = jnp.asarray(x_next)[None, None, None, :]  # (1,1,1,3)
-        mask_val = np.array(wall_mask_func(x_next_jax))[0, 0, 0]
-        if mask_val < 0.5:
-            pts[k+1] = x_next
-            n_pts = k + 2
-            Lpar = ds * (n_pts - 1)
-            return pts[:n_pts], Lpar
-
-        pts[k+1] = x_next
-
-    n_pts = max_steps
-    Lpar = ds * (n_pts - 1)
-    return pts, Lpar
+    return pts, L
 
 
-def surface_points_from_mask(xyz: Array, mask_plasma: Array) -> np.ndarray:
-    """
-    Extract approximate surface points from a binary mask by selecting
-    voxels that are plasma but have at least one non-plasma neighbor.
-    """
-    mask = np.array(mask_plasma)
-    xyz_np = np.array(xyz)
-
-    # pad mask to handle edges
-    pad = np.pad(mask, 1, mode="edge")
-    surf = np.zeros_like(mask, dtype=bool)
-
-    # 6-neighbor stencil
-    for axis in range(3):
-        for shift in (-1, 1):
-            shifted = np.roll(pad, shift=shift, axis=axis+0)[1:-1, 1:-1, 1:-1]
-            surf |= (mask == 1.0) & (shifted == 0.0)
-
-    pts = xyz_np[surf]
-    return pts
-
-def cylinder_surface_points(R_wall: float,
-                            zlim: Tuple[float, float],
-                            n_theta: int = 128,
-                            n_z: int = 64) -> np.ndarray:
-    theta = np.linspace(0, 2*np.pi, n_theta, endpoint=False)
-    z = np.linspace(zlim[0], zlim[1], n_z)
-    Theta, Z = np.meshgrid(theta, z, indexing="ij")
-    X = R_wall * np.cos(Theta)
-    Y = R_wall * np.sin(Theta)
-    pts = np.stack([X, Y, Z], axis=-1)  # (n_theta, n_z, 3)
-    return pts.reshape(-1, 3)
+# ---------------------------------------------------------------------------
+# 3D geometry figure
+# ---------------------------------------------------------------------------
 
 def make_3d_geometry_figure(
     cfg,
     coils,
     B_func: Callable[[Array], Array],
     wall_mask_func: Callable[[Array], Array],
-    R0: float,
-    a: float,
     n_fieldlines: int = 24,
     fieldline_length: float = 4.0,
     fieldline_steps: int = 400,
-    use_voxel_surface: bool = False,
     outdir: str = "figures",
 ) -> None:
     """
-    PRL-style geometry panel for a circular torus:
-      left: coils + toroidal SOL surface + field lines colored by L_parallel
-      right: connection length vs poloidal angle theta.
+    3D torus + coils + field lines, colored by L_parallel along each line,
+    plus a side panel with L_parallel vs poloidal angle.
     """
     os.makedirs(outdir, exist_ok=True)
 
-    # Rebuild grid + mask (for optional voxel surface)
-    x, y, z, xyz = build_cartesian_grid(cfg)
-    mask_plasma = wall_mask_func(xyz)
-    mask_np = np.array(mask_plasma)
+    x, y, z, xyz = build_cartesian_grid_from_cfg(cfg)
+    xyz_j = jnp.asarray(xyz)
+    mask_plasma = np.array(wall_mask_func(xyz_j))
 
-    # ------------------------------------------------------------------
-    # Field-line starting points: scan poloidal angle theta at fixed
-    # toroidal angle zeta = 0 on a ring just inside the torus.
-    # ------------------------------------------------------------------
-    theta_pol = np.linspace(0.0, 2.0 * np.pi, n_fieldlines, endpoint=False)
-    zeta0 = 0.0
-    r_minor = 0.9 * a   # slightly inside the SOL boundary
+    # ring of start points near outer midplane
+    theta = np.linspace(0.0, 2.0 * np.pi, n_fieldlines, endpoint=False)
+    r0 = cfg.a * 0.8
+    sgn = 1.0  # outboard
+    R_start = cfg.R0 + r0 * np.cos(theta)
+    Z_start = r0 * np.sin(theta)
+    starts = np.stack(
+        [R_start * np.cos(0.0), R_start * np.sin(0.0), Z_start],
+        axis=1,
+    )
 
-    X0 = (R0 + r_minor * np.cos(theta_pol)) * np.cos(zeta0)
-    Y0 = (R0 + r_minor * np.cos(theta_pol)) * np.sin(zeta0)
-    Z0 = r_minor * np.sin(theta_pol)
-    starts = np.stack([X0, Y0, Z0], axis=1)
+    def mask_point(xp: Array) -> Array:
+        # xp: (1,3)
+        return wall_mask_func(xp)
 
-    # Keep only starts actually inside plasma mask
-    dx = float(x[1] - x[0])
-    dy = float(y[1] - y[0])
-    dz = float(z[1] - z[0])
-
-    def nearest_idx(val, grid, d):
-        return np.clip(
-            np.round((val - grid[0]) / d).astype(int),
-            0,
-            len(grid) - 1,
-        )
-
-    ix = nearest_idx(starts[:, 0], np.array(x), dx)
-    iy = nearest_idx(starts[:, 1], np.array(y), dy)
-    iz = nearest_idx(starts[:, 2], np.array(z), dz)
-
-    inside = mask_np[ix, iy, iz] > 0.5
-    starts = starts[inside]
-    theta_pol = theta_pol[inside]
-    if starts.shape[0] == 0:
-        raise RuntimeError(
-            "No valid start points for field lines on the poloidal ring; "
-            "check R0, a, or mask."
-        )
-
-    # Step size along field line
     ds = fieldline_length / fieldline_steps
 
-    # ------------------------------------------------------------------
-    # Smooth circular torus surface: (theta_pol, zeta_tor)
-    # ------------------------------------------------------------------
-    n_theta_surf = 96
-    n_zeta_surf = 128
-    theta_surf = np.linspace(0.0, 2.0 * np.pi, n_theta_surf, endpoint=False)
-    zeta_surf = np.linspace(0.0, 2.0 * np.pi, n_zeta_surf, endpoint=False)
-    Theta_s, Zeta_s = np.meshgrid(theta_surf, zeta_surf, indexing="ij")
-
-    X_s = (R0 + a * np.cos(Theta_s)) * np.cos(Zeta_s)
-    Y_s = (R0 + a * np.cos(Theta_s)) * np.sin(Zeta_s)
-    Z_s = a * np.sin(Theta_s)
-
-    # Optional voxel-based "cloud" of plasma boundary points
-    if use_voxel_surface:
-        voxel_pts = surface_points_from_mask(xyz, mask_plasma)
-    else:
-        voxel_pts = None
-
-    # ------------------------------------------------------------------
-    # Trace field lines & collect connection lengths
-    # ------------------------------------------------------------------
     fieldlines = []
-    Lpars = []
+    L_lines = []
+    theta_lines = []
 
-    for x0 in starts:
-        pts, Lpar = trace_field_line_with_connection(
-            x0, B_func, wall_mask_func, cfg, ds=ds, max_steps=fieldline_steps
-        )
+    for t0, x0 in zip(theta, starts):
+        pts, L = trace_field_line(x0, B_func, ds=ds, n_steps=fieldline_steps, mask_func=mask_point)
         fieldlines.append(pts)
-        Lpars.append(Lpar)
+        L_lines.append(L)
+        theta_lines.append(t0)
 
-    Lpars = np.array(Lpars)
-    Lmin = float(Lpars.min())
-    Lmax = float(Lpars.max() + 1e-12)
-    cmap = plt.get_cmap("viridis")
+    L_lines = np.array(L_lines)
+    theta_lines = np.array(theta_lines)
 
-    # ------------------------------------------------------------------
-    # Plot: 3D geometry + L_parallel(theta)
-    # ------------------------------------------------------------------
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-    from matplotlib.gridspec import GridSpec
+    # Torus surface for SOL
+    n_theta_surf = 128
+    n_phi = 128
+    th = np.linspace(0, 2 * np.pi, n_theta_surf, endpoint=False)
+    ph = np.linspace(0, 2 * np.pi, n_phi, endpoint=False)
+    TH, PH = np.meshgrid(th, ph, indexing="ij")
+    Xs = (cfg.R0 + cfg.a * np.cos(TH)) * np.cos(PH)
+    Ys = (cfg.R0 + cfg.a * np.cos(TH)) * np.sin(PH)
+    Zs = cfg.a * np.sin(TH)
 
-    fig = plt.figure(figsize=(8.0, 4.8))
-    gs = GridSpec(1, 2, width_ratios=[2.0, 1.0], figure=fig)
+    # --- Plot ---
+    fig = plt.figure(figsize=(8.0, 4.5))
+    ax3d = fig.add_subplot(1, 2, 1, projection="3d")
 
-    ax3d = fig.add_subplot(gs[0, 0], projection="3d")
-    axL = fig.add_subplot(gs[0, 1])
-
-    # 1) Coils
+    # coils
     if coils is not None:
-        coils.plot(
-            ax=ax3d,
-            show=False,
-            color="saddlebrown",
-            linewidth=3.0,
-            label="Coils",
-        )
+        coils.plot(ax=ax3d, show=False, color="saddlebrown", linewidth=2.5)
 
-    # 2) Toroidal SOL surface
-    surf = ax3d.plot_surface(
-        X_s,
-        Y_s,
-        Z_s,
-        rstride=2,
-        cstride=2,
+    # torus surface
+    ax3d.plot_surface(
+        Xs,
+        Ys,
+        Zs,
+        rstride=3,
+        cstride=3,
         linewidth=0,
         antialiased=True,
         alpha=0.25,
@@ -366,40 +212,27 @@ def make_3d_geometry_figure(
         shade=True,
     )
 
-    # 3) Optional voxel boundary points
-    if voxel_pts is not None and voxel_pts.size > 0:
-        ax3d.scatter(
-            voxel_pts[:, 0],
-            voxel_pts[:, 1],
-            voxel_pts[:, 2],
-            s=1.5,
-            alpha=0.05,
-            color="tab:blue",
-        )
+    # field lines colored by L_parallel
+    L_min = L_lines.min()
+    L_max = L_lines.max()
+    norm = plt.Normalize(L_min, L_max)
+    cmap = plt.cm.viridis
 
-    # 4) Field lines colored by connection length
-    for pts, Lpar in zip(fieldlines, Lpars):
-        t = (Lpar - Lmin) / (Lmax - Lmin + 1e-12)
-        color = cmap(t)
+    for pts, L in zip(fieldlines, L_lines):
         ax3d.plot(
             pts[:, 0],
             pts[:, 1],
             pts[:, 2],
-            linewidth=1.6,
-            alpha=0.95,
-            color=color,
+            linewidth=1.8,
+            color=cmap(norm(L)),
         )
 
-    # Axes styling
     ax3d.set_xlabel(r"$x$")
     ax3d.set_ylabel(r"$y$")
     ax3d.set_zlabel(r"$z$")
+    ax3d.set_title("ESSOS coils, field lines,\n and toroidal SOL surface")
 
-    ax3d.xaxis.pane.set_facecolor((1.0, 1.0, 1.0, 0.0))
-    ax3d.yaxis.pane.set_facecolor((1.0, 1.0, 1.0, 0.0))
-    ax3d.zaxis.pane.set_facecolor((1.0, 1.0, 1.0, 0.0))
-    ax3d.grid(False)
-
+    # equal aspect
     max_range = max(
         x.max() - x.min(),
         y.max() - y.min(),
@@ -413,145 +246,269 @@ def make_3d_geometry_figure(
     ax3d.set_zlim(zmid - max_range, zmid + max_range)
     ax3d.view_init(elev=22, azim=-60)
 
-    ax3d.set_title("ESSOS coils, field lines, and toroidal SOL surface")
-
-    # Legend for coils + surface
-    coil_handle = Line2D(
-        [0], [0],
-        color="saddlebrown",
-        linewidth=3.0,
-        label="Coils",
-    )
-    surf_handle = Patch(
-        facecolor="tab:blue",
-        edgecolor="none",
-        alpha=0.25,
-        label="SOL surface",
-    )
-    ax3d.legend(
-        handles=[coil_handle, surf_handle],
-        loc="upper left",
-        frameon=False,
-    )
-
-    # Colorbar for connection length
-    sm = plt.cm.ScalarMappable(
-        cmap=cmap,
-        norm=plt.Normalize(vmin=Lmin, vmax=Lmax),
-    )
+    # colorbar
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    cbar = fig.colorbar(
-        sm,
-        ax=ax3d,
-        pad=0.02,
-        shrink=0.8,
-    )
+    cbar = fig.colorbar(sm, ax=ax3d, pad=0.05)
     cbar.set_label(r"$L_\parallel$")
 
-    # ------------------------------------------------------------------
-    # Right panel: L_parallel vs poloidal angle theta
-    # ------------------------------------------------------------------
-    axL.plot(theta_pol, Lpars, "o-", ms=4)
-    axL.set_xlabel(r"Poloidal angle $\theta$")
-    axL.set_ylabel(r"$L_\parallel$")
-    axL.set_xlim(0.0, 2.0 * np.pi)
-    axL.set_xticks(
-        [0.0, np.pi / 2, np.pi, 3 * np.pi / 2, 2 * np.pi]
-    )
-    axL.set_xticklabels(
-        ["0", r"$\pi/2$", r"$\pi$", r"$3\pi/2$", r"$2\pi$"]
-    )
-    axL.grid(True, alpha=0.3)
+    # L_parallel vs poloidal angle
+    ax2 = fig.add_subplot(1, 2, 2)
+    ax2.plot(theta_lines, L_lines, "o-")
+    ax2.set_xlabel(r"Poloidal angle $\theta$")
+    ax2.set_ylabel(r"$L_\parallel(\theta)$")
+    ax2.set_title(r"Connection length along SOL ring")
+    ax2.grid(True)
 
     fig.tight_layout()
-    fname = os.path.join(outdir, "geometry_torus_Lpar_vs_theta.png")
+    fname = os.path.join(outdir, "geometry_coils_fieldlines_torus.png")
     fig.savefig(fname, dpi=300)
     plt.close(fig)
-
-    print(
-        f"[fig] Saved torus geometry figure with L_parallel(theta) to '{fname}'. "
-        f"(L_parallel in [{Lmin:.2f}, {Lmax:.2f}])"
-    )
+    print(f"[fig] Saved 3D geometry figure to '{fname}'.")
 
 
-def toroidal_wall_mask(xyz: Array,
-                       R0: float = 1.0,
-                       a: float = 0.6) -> Array:
+# ---------------------------------------------------------------------------
+# 2D slices & radial profiles (existing figure)
+# ---------------------------------------------------------------------------
+
+def make_publication_figures(
+    times: np.ndarray,
+    y_hist: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    outdir: str = "figures",
+) -> None:
     """
-    Toroidal plasma mask for a circular torus:
-
-        (sqrt(x^2 + y^2) - R0)^2 + z^2 < a^2
-
-    mask = 1 inside torus, 0 outside.
-    R0 : major radius
-    a  : minor radius (SOL thickness).
-    """
-    x = xyz[..., 0]
-    y = xyz[..., 1]
-    z = xyz[..., 2]
-
-    R = jnp.sqrt(x**2 + y**2)
-    dist2 = (R - R0)**2 + z**2
-    mask = (dist2 < a**2).astype(jnp.float64)
-    return mask
-
-def make_dynamics_figure(times: np.ndarray,
-                         y_hist: np.ndarray,
-                         cfg,
-                         wall_mask_func: Callable[[Array], Array],
-                         outdir: str = "figures") -> None:
-    """
-    Summarize the time evolution of volume-averaged n, T_e and RMS u_parallel
-    inside the plasma.
-
-    Produces a 2-panel figure:
-      top: <n>, <T_e> vs t
-      bottom: <u_parallel^2>^{1/2} vs t
+    1) T_e(x,y) slice at midplane.
+    2) n(x,y) slice at midplane.
+    3) Radial profiles at outer midplane.
     """
     os.makedirs(outdir, exist_ok=True)
 
-    # Rebuild mask on the same grid
-    x, y, z, xyz = build_cartesian_grid(cfg)
-    mask_plasma = np.array(wall_mask_func(xyz))
-    mask = mask_plasma.astype(np.float64)
-
     Nt, _, Nx, Ny, Nz = y_hist.shape
-    n_hist = y_hist[:, 0]
-    u_hist = y_hist[:, 1]
-    T_hist = y_hist[:, 2]
+    n = y_hist[-1, 0]
+    T = y_hist[-1, 2]
 
-    # Broadcast mask to all times
-    mask4d = mask[None, ...]  # (1, Nx,Ny,Nz)
-    vol_norm = mask4d.sum()
+    iz0 = int(np.argmin(np.abs(z)))
+    z0 = float(z[iz0])
 
-    n_mean = (n_hist * mask4d).sum(axis=(1, 2, 3)) / vol_norm
-    T_mean = (T_hist * mask4d).sum(axis=(1, 2, 3)) / vol_norm
-    u_rms = np.sqrt(
-        (u_hist**2 * mask4d).sum(axis=(1, 2, 3)) / vol_norm
-    )
+    n_slice = n[:, :, iz0]
+    T_slice = T[:, :, iz0]
 
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, sharex=True, figsize=(5.0, 6.0)
-    )
+    X, Y = np.meshgrid(x, y, indexing="ij")
 
-    # Top: density & temperature averages
-    ax1.plot(times, n_mean, label=r"$\langle n \rangle$")
-    ax1.plot(times, T_mean, label=r"$\langle T_e \rangle$")
-    ax1.set_ylabel("Volume averages (arb. units)")
-    ax1.legend(loc="best")
-    ax1.grid(True, alpha=0.3)
+    # Te slice
+    fig1, ax1 = plt.subplots(figsize=(5.0, 4.0))
+    c1 = ax1.pcolormesh(X, Y, T_slice.T, shading="auto")
+    fig1.colorbar(c1, ax=ax1, label=r"$T_e$")
+    ax1.set_xlabel(r"$x$")
+    ax1.set_ylabel(r"$y$")
+    ax1.set_title(rf"$T_e(x,y,z\approx {z0:.2f})$ at $t={times[-1]:.3e}$")
+    fig1.tight_layout()
+    fig1.savefig(os.path.join(outdir, "Te_slice_midplane.png"), dpi=300)
+    plt.close(fig1)
 
-    # Bottom: RMS parallel flow
-    ax2.plot(times, u_rms, label=r"$\langle u_\parallel^2 \rangle^{1/2}$")
-    ax2.set_xlabel(r"$t$")
-    ax2.set_ylabel("RMS $u_\parallel$")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(loc="best")
+    # n slice
+    fig2, ax2 = plt.subplots(figsize=(5.0, 4.0))
+    c2 = ax2.pcolormesh(X, Y, n_slice.T, shading="auto")
+    fig2.colorbar(c2, ax=ax2, label=r"$n$")
+    ax2.set_xlabel(r"$x$")
+    ax2.set_ylabel(r"$y$")
+    ax2.set_title(rf"$n(x,y,z\approx {z0:.2f})$ at $t={times[-1]:.3e}$")
+    fig2.tight_layout()
+    fig2.savefig(os.path.join(outdir, "n_slice_midplane.png"), dpi=300)
+    plt.close(fig2)
 
-    fig.tight_layout()
-    fname = os.path.join(outdir, "dynamics_volume_averages.png")
+    # radial profiles at outer midplane y>0
+    iy_pos = np.argmax(y > 0.0) if np.any(y > 0.0) else Ny // 2
+    n_prof = n[:, iy_pos, iz0]
+    T_prof = T[:, iy_pos, iz0]
+    R_prof = np.sqrt(x**2 + y[iy_pos] ** 2)
+
+    fig3, ax3 = plt.subplots(figsize=(5.0, 4.0))
+    ax3.plot(R_prof, T_prof, label=r"$T_e$")
+    ax3.plot(R_prof, n_prof, label=r"$n$")
+    ax3.set_xlabel(r"$R$")
+    ax3.set_ylabel("Profiles (arb.)")
+    ax3.set_title(rf"Radial profiles at $(y={y[iy_pos]:.2f}, z={z0:.2f})$")
+    ax3.legend()
+    fig3.tight_layout()
+    fig3.savefig(os.path.join(outdir, "radial_profiles.png"), dpi=300)
+    plt.close(fig3)
+
+    print(f"[fig] Saved midplane & profile figures to '{outdir}'.")
+
+
+# ---------------------------------------------------------------------------
+# Dynamics + neutrals
+# ---------------------------------------------------------------------------
+
+def make_dynamics_figure(
+    times: np.ndarray,
+    y_hist: np.ndarray,
+    n_neut_hist: np.ndarray,
+    cfg,
+    mask_plasma_np: np.ndarray,
+    outdir: str = "figures",
+) -> None:
+    """
+    Volume-averaged evolution of n, T, u and neutrals.
+    """
+    os.makedirs(outdir, exist_ok=True)
+
+    x, y, z, xyz = build_cartesian_grid_from_cfg(cfg)
+    dx = x[1] - x[0]
+    dy = y[1] - y[0]
+    dz = z[1] - z[0]
+    vol_cell = dx * dy * dz
+    mask = mask_plasma_np
+
+    Nt = times.size
+    n_avg = np.zeros(Nt)
+    T_avg = np.zeros(Nt)
+    u_rms = np.zeros(Nt)
+
+    for it in range(Nt):
+        n = y_hist[it, 0]
+        u = y_hist[it, 1]
+        T = y_hist[it, 2]
+
+        w = mask * vol_cell
+        V = w.sum()
+
+        n_avg[it] = (n * w).sum() / V
+        T_avg[it] = (T * w).sum() / V
+        u_rms[it] = np.sqrt(((u**2) * w).sum() / V)
+
+    fig, axes = plt.subplots(2, 2, figsize=(8.0, 6.0), sharex=True)
+
+    ax = axes[0, 0]
+    ax.plot(times, n_avg)
+    ax.set_ylabel(r"$\langle n \rangle$")
+    ax.grid(True)
+
+    ax = axes[0, 1]
+    ax.plot(times, T_avg)
+    ax.set_ylabel(r"$\langle T_e \rangle$")
+    ax.grid(True)
+
+    ax = axes[1, 0]
+    ax.plot(times, u_rms)
+    ax.set_xlabel(r"$t$")
+    ax.set_ylabel(r"$u_\parallel^{\mathrm{rms}}$")
+    ax.grid(True)
+
+    ax = axes[1, 1]
+    ax.plot(times, n_neut_hist)
+    ax.set_xlabel(r"$t$")
+    ax.set_ylabel(r"$n_n$ (0D)")
+    ax.grid(True)
+
+    fig.suptitle("SOL volume-averaged dynamics and neutrals")
+    fig.tight_layout(rect=[0, 0.0, 1, 0.95])
+    fname = os.path.join(outdir, "dynamics_neutrals.png")
     fig.savefig(fname, dpi=300)
     plt.close(fig)
-
     print(f"[fig] Saved dynamics figure to '{fname}'.")
 
+
+# ---------------------------------------------------------------------------
+# 1D SOL benchmark + scaling
+# ---------------------------------------------------------------------------
+
+def measure_sol_width_and_theory(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    n3d: np.ndarray,
+    T3d: np.ndarray,
+    mask_plasma: np.ndarray,
+    L_conn: np.ndarray,
+    cfg,
+) -> Tuple[float, float]:
+    """
+    Measure SOL scrape-off width λ_n from the 3D simulation at midplane and
+    compare with a 1D analytic λ ~ sqrt(D_perp L_parallel / c_s).
+    """
+    Nz = z.size
+    iz0 = int(np.argmin(np.abs(z)))
+    iy_pos = np.argmax(y > 0.0) if np.any(y > 0.0) else len(y) // 2
+
+    n_line = n3d[:, iy_pos, iz0]
+    T_line = T3d[:, iy_pos, iz0]
+    mask_line = mask_plasma[:, iy_pos, iz0]
+    L_line = L_conn[:, iy_pos, iz0]
+
+    R_line = np.sqrt(x**2 + y[iy_pos] ** 2)
+    r_minor = R_line - cfg.R0  # approx radial coord at midplane
+
+    # use only SOL region inside plasma and r>0
+    sel = (mask_line > 0.5) & (r_minor > 0.0)
+    r = r_minor[sel]
+    n_sol = n_line[sel]
+    T_sol = T_line[sel]
+    L_sol = L_line[sel]
+
+    # avoid zeros
+    n_sol = np.maximum(n_sol, 1e-8)
+
+    # exponential fit: n ~ exp(-r/λ)
+    p = np.polyfit(r, np.log(n_sol), 1)
+    slope = p[0]
+    lambda_num = -1.0 / slope
+
+    # theory
+    cs = np.sqrt(T_sol.mean() / cfg.m_i)
+    Lpar = L_sol.mean()
+    lambda_th = np.sqrt(cfg.D_perp * Lpar / cs)
+
+    print(
+        f"[scaling] Measured λ_n={lambda_num:.3e}, "
+        f"theory λ_th={lambda_th:.3e}, cs={cs:.3e}, Lpar={Lpar:.3e}"
+    )
+
+    return float(lambda_num), float(lambda_th)
+
+
+def make_sol_width_scaling_figure(
+    D_values: np.ndarray,
+    lambda_num: np.ndarray,
+    lambda_th: np.ndarray,
+    outdir: str = "figures",
+) -> None:
+    """
+    Plot SOL scrape-off width scaling vs D_perp:
+
+      • λ_num vs λ_th (1:1 line).
+      • λ_num / λ_th vs D_perp^{1/2}.
+    """
+    os.makedirs(outdir, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.0, 4.0))
+
+    # panel (a): λ_num vs λ_th
+    ax = axes[0]
+    ax.loglog(lambda_th, lambda_num, "o")
+    lam_min = min(lambda_th.min(), lambda_num.min()) * 0.7
+    lam_max = max(lambda_th.max(), lambda_num.max()) * 1.3
+    ax.loglog([lam_min, lam_max], [lam_min, lam_max], "k--", label="1:1")
+    ax.set_xlabel(r"$\lambda_{\mathrm{th}}$")
+    ax.set_ylabel(r"$\lambda_{\mathrm{3D}}$")
+    ax.set_title(r"Scrape-off width: 3D vs 1D theory")
+    ax.legend()
+    ax.grid(True, which="both")
+
+    # panel (b): ratio vs sqrt(D)
+    ax = axes[1]
+    ax.plot(np.sqrt(D_values), lambda_num / lambda_th, "o-")
+    ax.set_xlabel(r"$D_\perp^{1/2}$")
+    ax.set_ylabel(r"$\lambda_{\mathrm{3D}} / \lambda_{\mathrm{th}}$")
+    ax.set_title(r"Scaling of $\lambda_n$ with $D_\perp$")
+    ax.grid(True)
+
+    fig.tight_layout()
+    fname = os.path.join(outdir, "sol_width_scaling.png")
+    fig.savefig(fname, dpi=300)
+    plt.close(fig)
+    print(f"[fig] Saved SOL-width scaling figure to '{fname}'.")
