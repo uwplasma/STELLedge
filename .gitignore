@@ -209,3 +209,4 @@ __marimo__/
 # Manual additions below this line
 # Figures output directory
 figures/
+.DS_Store
